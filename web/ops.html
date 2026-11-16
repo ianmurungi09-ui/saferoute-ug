@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SafeRoute Ops</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#fafaf9; --fg:#1c1917; --mut:#78716c; --card:#fff; --line:#e7e5e4; --bad:#b91c1c; --warn:#b45309; --ok:#15803d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --fg:#fafaf9; --mut:#a8a29e; --card:#292524; --line:#44403c; --bad:#f87171; --warn:#fbbf24; --ok:#4ade80; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; display:grid; grid-template-columns:1fr 360px; height:100vh; }
+  #map { height:100vh; }
+  aside { display:flex; flex-direction:column; border-left:1px solid var(--line); min-width:0; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0 0 8px; }
+  form { display:flex; gap:6px; }
+  input { flex:1; min-width:0; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); }
+  button { padding:6px 12px; border:0; border-radius:6px; background:var(--fg); color:var(--bg); cursor:pointer; }
+  #status { color:var(--mut); font-size:12px; margin-top:6px; }
+  #feed { list-style:none; margin:0; padding:0; overflow-y:auto; flex:1; }
+  #feed li { padding:8px 16px; border-bottom:1px solid var(--line); }
+  #feed .t { color:var(--mut); font-size:11px; }
+  .crash { border-left:4px solid var(--bad); } .flag { border-left:4px solid var(--warn); } .ev { border-left:4px solid var(--line); }
+  @media (max-width: 800px) { body { grid-template-columns:1fr; grid-template-rows:55vh 1fr; } #map { height:55vh; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside>
+  <header>
+    <h1>SafeRoute operations</h1>
+    <form id="f"><input id="key" type="password" placeholder="Admin key" autocomplete="off"><button>Connect</button></form>
+    <div id="status">Not connected</div>
+  </header>
+  <ul id="feed"></ul>
+</aside>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+"use strict";
+// The map is optional: if the Leaflet CDN or tiles are unreachable (poor connection), the live feed still works.
+const HAS_MAP = typeof L !== "undefined";
+const mapEl = document.getElementById("map");
+let map = null, hazardLayer = null;
+if (HAS_MAP) {
+  map = L.map("map").setView([1.37, 32.29], 7);
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
+  hazardLayer = L.layerGroup().addTo(map);
+} else {
+  mapEl.textContent = "Map unavailable (could not load the map library). Live alerts still appear on the right.";
+  mapEl.style.cssText = "display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--mut)";
+}
+const vehicleMarkers = new Map();
+const SEV = { low: "#ca8a04", medium: "#ea580c", high: "#dc2626" };
+const feed = document.getElementById("feed");
+const statusEl = document.getElementById("status");
+let adminKey = "";
+try { adminKey = sessionStorage.getItem("saferoute-key") || ""; } catch (e) {}
+document.getElementById("key").value = adminKey;
+
+// All server-supplied strings are written with textContent, never innerHTML.
+function addFeed(cls, title, detail) {
+  const li = document.createElement("li");
+  li.className = cls;
+  const b = document.createElement("div"); b.textContent = title;
+  const t = document.createElement("div"); t.className = "t";
+  t.textContent = new Date().toLocaleTimeString() + (detail ? " · " + detail : "");
+  li.append(b, t);
+  feed.prepend(li);
+  while (feed.children.length > 200) feed.lastChild.remove();
+}
+
+function show(m) {
+  switch (m.type) {
+    case "position": {
+      if (!HAS_MAP) break;
+      let mk = vehicleMarkers.get(m.plate);
+      if (!mk) { mk = L.circleMarker([m.lat, m.lon], { radius: 6, color: "#2563eb", weight: 2, fillOpacity: 0.8 }).addTo(map); mk.bindTooltip(m.plate); vehicleMarkers.set(m.plate, mk); }
+      else mk.setLatLng([m.lat, m.lon]);
+      break;
+    }
+    case "driving_event":
+      addFeed("ev", m.plate + " · " + m.kind.replace("_", " "), m.kind === "overspeed" ? "+" + m.value + " km/h for " + m.duration_s + " s" : "value " + m.value);
+      break;
+    case "flagged_vehicle_ahead":
+      addFeed("flag", m.plate + " (" + m.status + ") approaching " + m.checkpoint, "failed: " + (m.failed_items || []).join(", ") + " · " + m.distance_km + " km, ~" + m.eta_min + " min");
+      break;
+    case "inspection": addFeed("ev", m.plate + " inspected: " + m.status, (m.failed || []).join(", ")); break;
+    case "hazard_confirmed": addFeed("ev", "Road hazard #" + m.hazard_id + " confirmed", ""); loadHazards(); break;
+    case "crash": {
+      addFeed("crash", "CRASH " + m.plate + " · " + m.status, m.landmark + " · confidence " + m.confidence + " · notified: " + (m.notified || []).join(", "));
+      if (HAS_MAP) {
+        L.circleMarker([m.lat, m.lon], { radius: 12, color: "#dc2626", weight: 3, fillOpacity: 0.5 }).addTo(map).bindTooltip("Crash " + m.plate);
+        map.setView([m.lat, m.lon], 11);
+      }
+      break;
+    }
+    case "crash_cancelled": addFeed("ev", "Crash #" + m.crash_id + " cancelled", "by " + m.by); break;
+    case "crash_confirmed": addFeed("ev", "Crash #" + m.crash_id + " confirmed", ""); break;
+  }
+}
+
+async function loadHazards() {
+  if (!HAS_MAP) return;
+  try {
+    const gj = await (await fetch("/hazards")).json();
+    hazardLayer.clearLayers();
+    for (const f of gj.features) {
+      const [lon, lat] = f.geometry.coordinates, p = f.properties;
+      L.circleMarker([lat, lon], { radius: 5 + Math.min(p.reports, 10), color: SEV[p.severity] || "#666", fillOpacity: p.status === "confirmed" ? 0.7 : 0.25 })
+        .bindTooltip("Hazard #" + p.id + " · " + p.severity + " · " + p.status + " · " + p.reports + " reports").addTo(hazardLayer);
+    }
+  } catch (e) { /* offline: keep the last layer */ }
+}
+
+let ws, retry = 0, pollTimer = null;
+const seen = new Set();                       // de-duplicates messages seen via both WebSocket and polling
+function once(m) { const k = JSON.stringify(m); if (seen.has(k)) return; seen.add(k); if (seen.size > 2000) seen.clear(); show(m); }
+
+// Fallback when WebSockets are blocked (some proxies / hosts): poll the recent-messages endpoint.
+async function poll() {
+  try {
+    const r = await fetch("/ops/recent", { headers: { "X-Admin-Key": adminKey } });
+    if (r.ok) { for (const m of await r.json()) once(m); if (!ws || ws.readyState !== 1) statusEl.textContent = "Live (polling every 3 s)"; }
+  } catch (e) { statusEl.textContent = "Offline, retrying…"; }
+}
+function startPolling() { if (!pollTimer) pollTimer = setInterval(poll, 3000); }
+function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+
+function connect() {
+  if (!adminKey) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws/ops?key=" + encodeURIComponent(adminKey));
+  ws.onopen = () => { retry = 0; stopPolling(); statusEl.textContent = "Live"; };
+  ws.onmessage = (e) => { try { once(JSON.parse(e.data)); } catch (err) {} };
+  ws.onclose = () => { startPolling(); poll(); setTimeout(connect, Math.min(30000, 1000 * 2 ** retry++)); };
+}
+
+document.getElementById("f").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  adminKey = document.getElementById("key").value.trim();
+  try { sessionStorage.setItem("saferoute-key", adminKey); } catch (e) {}
+  if (ws) { ws.onclose = null; ws.close(); }
+  stopPolling();
+  const r = await fetch("/ops/recent", { headers: { "X-Admin-Key": adminKey } });
+  if (!r.ok) { statusEl.textContent = "Wrong admin key"; return; }
+  feed.replaceChildren(); seen.clear();
+  for (const m of (await r.json()).reverse()) once(m);   // oldest first, so the newest ends up on top
+  connect();
+});
+
+loadHazards();
+setInterval(loadHazards, 60000);
+if (adminKey) document.getElementById("f").requestSubmit();
+</script>
+</body>
+</html>
