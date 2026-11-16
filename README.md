@@ -1,5 +1,11 @@
 # SafeRoute UG (Safiri)
 
+[![Tests](https://github.com/ianmurungi09-ui/saferoute-ug/actions/workflows/tests.yml/badge.svg)](https://github.com/ianmurungi09-ui/saferoute-ug/actions/workflows/tests.yml)
+[![License](https://img.shields.io/github/license/ianmurungi09-ui/saferoute-ug)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/ianmurungi09-ui/saferoute-ug)](https://github.com/ianmurungi09-ui/saferoute-ug/commits/main)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Status](https://img.shields.io/badge/status-prototype-orange)
+
 One backend for four road-safety problems in Uganda: dangerous vehicles, speeding, potholes, and slow crash response.
 
 | Module | What it does | Code |
